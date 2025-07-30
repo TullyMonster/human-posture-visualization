@@ -129,7 +129,7 @@ class PoseAdjusterEngine:
 
     def load_data(self):
         """加载数据和模型（支持多种数据集格式）"""
-        print(f'加载数据集: {self.dataset_config.path}')
+        print(f'数据集: {self.dataset_config.path}')
 
         # 首先尝试智能适配器（推荐方式）
         adapter_success = False
@@ -148,6 +148,8 @@ class PoseAdjusterEngine:
             self.total_frames = self.poses.shape[0]
             self.framerate = float(data.get('mocap_framerate', 30.0))
             adapter_success = True
+
+            print(f'{self.total_frames}帧, {self.poses.shape[1]}维姿态参数')
 
         except Exception as e:
             # 回退到标准适配器
@@ -240,6 +242,8 @@ class PoseAdjusterEngine:
             model_path = recommended_model_config.model_path
             gender = recommended_model_config.gender.lower()
 
+            print(f'模型: {model_path}')
+
             if recommended_model_config.model_type == 'SMPLX':
                 from smplx import SMPLX
                 self.model = SMPLX(
@@ -258,9 +262,12 @@ class PoseAdjusterEngine:
                 )
         else:
             # 回退到默认SMPLX模型
+            default_model_path = "./models/smplx/SMPLX_NEUTRAL.npz"
+            print(f'⚠️ 使用默认模型: {default_model_path}')
+
             from smplx import SMPLX
             self.model = SMPLX(
-                model_path="./models/smplx/SMPLX_NEUTRAL.npz",
+                model_path=default_model_path,
                 gender="neutral",
                 num_betas=10,
                 use_pca=False,
@@ -307,10 +314,6 @@ class PoseAdjusterEngine:
 
         # 预测姿态的基础帧（考虑偏移）
         predicted_base_frame = frame_idx + self.frame_offset
-
-        # 记录偏移信息（已禁用日志输出）
-        # if self.frame_offset != 0:
-        #     print(f'🔄 帧偏移: GT帧{frame_idx} → 预测帧{predicted_base_frame} (偏移{self.frame_offset})')
 
         # 确保偏移后的帧在有效范围内
         if predicted_base_frame < 0:
@@ -1079,7 +1082,7 @@ def initialize_engine():
                 engine.frame_indices = valid_frames
                 engine.num_frames = len(valid_frames)
             print(
-                f'⏱️ 基于真实帧率{actual_framerate}fps重新计算帧间隔: {calculated_frame_interval}帧/{current_dataset_config.time_interval_ms}ms')
+                f'帧率{actual_framerate}fps: {calculated_frame_interval}帧/{current_dataset_config.time_interval_ms}ms')
             print(f'📋 更新后帧序列: {engine.frame_indices}')
         else:
             print(
@@ -1116,9 +1119,6 @@ def stop_config_monitoring():
         # 移除重复输出，由config_manager.stop_monitoring()自己输出
     except Exception as e:
         print(f'❌ 停止配置文件监控失败: {e}')
-
-
-# 注册程序退出时的清理函数已移动到start_config_monitoring函数内
 
 
 if __name__ == '__main__':
