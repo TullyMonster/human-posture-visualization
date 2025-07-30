@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>交互式人体姿态调节器</title>
+    <link rel="icon" type="image/png" href="{{ url_for('static', filename='favicon.png') }}">
+    <link rel="shortcut icon" type="image/png" href="{{ url_for('static', filename='favicon.png') }}">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #f5f5f5;
+            margin: 0;
+            padding: 0;
+            min-height: 100vh;
+        }
+
+        .info-bar {
+            position: fixed;
+            bottom: 10px;
+            left: 10px;
+            background: rgba(74, 84, 201, 0.9);
+            color: white;
+            padding: 8px 15px;
+            border-radius: 8px;
+            font-size: 12px;
+            z-index: 1000;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .status-float {
+            position: fixed;
+            bottom: 10px;
+            right: 10px;
+            background: rgba(40, 167, 69, 0.9);
+            color: white;
+            padding: 8px 15px;
+            border-radius: 8px;
+            font-size: 12px;
+            z-index: 1000;
+            display: none;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .status-float.show {
+            display: flex;
+        }
+
+        .status-float.loading {
+            background: rgba(255, 165, 0, 0.9);
+        }
+
+        .status-float.error {
+            background: rgba(220, 53, 69, 0.9);
+        }
+
+        /* 输入框和滑块警告提示样式 */
+        .input-warning, .slider-warning {
+            position: absolute;
+            background: #ff6b6b;
+            color: white;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            margin-top: 2px;
+            margin-left: 5px;
+            z-index: 1000;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+            animation: fadeInOut 3s ease-in-out;
+            white-space: nowrap;
+        }
+
+        .slider-warning {
+            position: fixed;
+            top: 50px;
+            right: 20px;
+            margin: 0;
+            background: #4a84c9;
+        }
+
+        @keyframes fadeInOut {
+            0% {
+                opacity: 0;
+                transform: translateY(-5px);
+            }
+            10% {
+                opacity: 1;
+                transform: translateY(0);
+            }
+            90% {
+                opacity: 1;
+                transform: translateY(0);
+            }
+            100% {
+                opacity: 0;
+                transform: translateY(-5px);
+            }
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .render-area {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            background: white;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 15px 20px;
+            box-shadow: 0 2px 15px rgba(0, 0, 0, 0.1);
+            z-index: 100;
+            min-height: 200px;
+            max-height: 50vh;
+            overflow-y: auto;
+        }
+
+        .render-image {
+            max-width: 100%;
+            max-height: 300px;
+            border-radius: 8px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+            object-fit: contain;
+        }
+
+        .frame-numbers {
+            display: flex;
+            justify-content: center;
+            margin: 8px auto;
+            gap: 0;
+        }
+
+        .frame-number-btn {
+            min-width: 20px;
+            height: 25px;
+            border: 1px solid #ddd;
+            background: #f8f9fa;
+            color: #333;
+            font-size: 11px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 0;
+            flex-shrink: 0;
+        }
+
+        .frame-number-btn:first-child {
+            border-top-left-radius: 4px;
+            border-bottom-left-radius: 4px;
+        }
+
+        .frame-number-btn:last-child {
+            border-top-right-radius: 4px;
+            border-bottom-right-radius: 4px;
+        }
+
+        .frame-number-btn:hover {
+            background: #e9ecef;
+            border-color: #adb5bd;
+        }
+
+        .frame-number-btn.active {
+            background: #4A54C9;
+            color: white;
+            border-color: #4A54C9;
+            font-weight: 600;
+        }
+
+        .render-controls {
+            margin-top: 15px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 20px;
+            flex-wrap: wrap;
+        }
+
+
+
+        .params-config {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: #f8f9fa;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+        }
+
+        .param-input {
+            width: 60px;
+            height: 24px;
+            border: 1px solid #ddd;
+            border-radius: 3px;
+            text-align: center;
+            font-size: 11px;
+            background: white;
+        }
+
+        /* 隐藏参数输入框的上下调节按钮 */
+        .param-input::-webkit-outer-spin-button,
+        .param-input::-webkit-inner-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
+        }
+
+        .param-input[type=number] {
+            -moz-appearance: textfield;
+        }
+
+        .config-btn {
+            padding: 4px 8px;
+            background: #28a745;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 11px;
+        }
+
+        .config-btn:hover:not(:disabled) {
+            background: #218838;
+        }
+
+        .config-btn:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+            opacity: 0.6;
+        }
+
+        /* 重置按钮特殊样式 */
+        #resetParamsBtn {
+            background: #dc3545 !important;
+        }
+
+        #resetParamsBtn:hover:not(:disabled) {
+            background: #c82333 !important;
+        }
+
+        #resetParamsBtn:disabled {
+            background: #6c757d !important;
+        }
+
+        .control-panel {
+            background: white;
+            padding: 20px;
+            margin-top: 0; /* 完全由JavaScript动态计算 */
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+            min-height: 80vh;
+            position: relative;
+            z-index: 1;
+        }
+
+        .panel-title {
+            font-size: 24px;
+            font-weight: 700;
+            color: #333;
+            margin-bottom: 15px;
+            text-align: center;
+        }
+
+        .joints-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .joint-group {
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 15px;
+            background: #fafafa;
+        }
+
+        .group-header {
+            font-size: 16px;
+            font-weight: 700;
+            color: #2c3e50;
+            margin-bottom: 15px;
+            text-align: center;
+            background: #ecf0f1;
+            padding: 8px;
+            border-radius: 6px;
+        }
+
+        .joint-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: #4A54C9;
+            margin-bottom: 8px;
+        }
+
+        .axis-control {
+            margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .axis-label {
+            font-size: 12px;
+            color: #666;
+            display: inline-block;
+            width: 60px;
+            flex-shrink: 0;
+        }
+
+        .range-hint {
+            font-size: 10px;
+            color: #999;
+            font-weight: normal;
+            margin-left: 8px;
+        }
+
+        .control-row {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .increment-input {
+            width: 40px;
+            height: 24px;
+            border: 1px solid #ddd;
+            border-radius: 3px;
+            text-align: center;
+            font-size: 11px;
+            background: white;
+        }
+
+        /* 隐藏增量输入框的上下调节按钮 */
+        .increment-input::-webkit-outer-spin-button,
+        .increment-input::-webkit-inner-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
+        }
+
+        .increment-input[type=number] {
+            -moz-appearance: textfield;
+        }
+
+        .angle-input {
+            width: 60px;
+            height: 24px;
+            border: 1px solid #ddd;
+            border-radius: 3px;
+            text-align: center;
+            font-size: 11px;
+            background: white;
+            margin-left: 5px;
+        }
+
+        /* 隐藏数字输入框的上下调节按钮 */
+        .angle-input::-webkit-outer-spin-button,
+        .angle-input::-webkit-inner-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
+        }
+
+        .angle-input[type=number] {
+            -moz-appearance: textfield;
+        }
+
+        /* 美化所有输入框的焦点样式 */
+        .angle-input:focus,
+        .increment-input:focus,
+        .param-input:focus {
+            outline: none;
+            border-color: #4A54C9;
+            box-shadow: 0 0 0 2px rgba(74, 84, 201, 0.2);
+        }
+
+        .degree-label {
+            font-size: 12px;
+            color: #666;
+            margin-left: 2px;
+            font-weight: 500;
+        }
+
+        .micro-btn {
+            width: 24px;
+            height: 24px;
+            border: 1px solid #ddd;
+            background: white;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .micro-btn:hover {
+            background: #f0f0f0;
+        }
+
+        .reset-joint-btn {
+            width: 20px;
+            height: 20px;
+            border: 1px solid #ff6b6b;
+            background: white;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #ff6b6b;
+        }
+
+        .reset-joint-btn:hover:not(:disabled) {
+            background: #ff6b6b;
+            color: white;
+        }
+
+        .reset-joint-btn:disabled {
+            cursor: not-allowed;
+            opacity: 0.5;
+        }
+
+        .action-buttons {
+            margin-top: 20px;
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .action-btn {
+            padding: 12px 20px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+        }
+
+        .reset-btn {
+            background: #ff6b6b;
+            color: white;
+        }
+
+        .reset-btn:hover {
+            background: #ff5252;
+        }
+
+        .export-btn {
+            background: #51cf66;
+            color: white;
+        }
+
+        .export-btn:hover {
+            background: #40c057;
+        }
+
+        .copy-btn {
+            background: #339af0;
+            color: white;
+        }
+
+        .copy-btn:hover {
+            background: #228be6;
+        }
+
+        .loading {
+            opacity: 0.6;
+            pointer-events: none;
+        }
+
+        .status-indicator {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-left: 8px;
+        }
+
+        .status-modified {
+            background: #ff9500;
+        }
+
+        .status-unmodified {
+            background: #51cf66;
+        }
+
+
+    </style>
+    <script src="{{ url_for('static', filename='js/pose_adjuster.js') }}"></script>
+</head>
+
+<body>
+<!-- 信息栏 -->
+<div class="info-bar">
+    <span id="dataInfo">正在加载数据信息...</span>
+</div>
+
+<!-- 右下角状态显示 -->
+<div class="status-float" id="statusFloat">
+    <span class="status-dot"></span>
+    <span class="status-text"></span>
+</div>
+
+
+<div class="container">
+    <!-- 顶部：多帧预览区域 -->
+    <div class="render-area">
+        <img id="renderImage" class="render-image" src="" alt="正在加载...">
+        
+        <!-- 帧数字导航条 -->
+        <div id="frameNumbers" class="frame-numbers"></div>
+        
+        <div class="render-controls">
+            <div class="params-config">
+                <label>起始帧:</label>
+                <input type="number" id="startFrameInput" class="param-input" value="" min="0" step="1">
+                <label>帧间隔:</label>
+                <input type="number" id="frameIntervalInput" class="param-input" value="" min="1" step="1">
+                <label>帧数:</label>
+                <input type="number" id="numFramesInput" class="param-input" value="" min="1" max="20" step="1">
+                <label>帧偏移:</label>
+                <input type="number" id="frameOffsetInput" class="param-input" value="0" step="1"
+                       title="预测数据相对于GT的偏移帧数&#10;建议尝试: ±10, ±20, ±50 等较大值以看到明显效果">
+                <button class="config-btn" onclick="updateSequence()">应用</button>
+                <button class="config-btn" id="resetParamsBtn" onclick="resetParams()" 
+                        style="background: #dc3545; margin-left: 5px;">重置</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 下方：姿态控制面板 -->
+    <div class="control-panel">
+        <h2 class="panel-title">姿态控制面板</h2>
+
+        <!-- 关节控制网格将通过JavaScript动态生成 -->
+        <div class="joints-grid" id="jointControls"></div>
+
+        <div class="action-buttons">
+            <button id="copyPrevBtn" class="action-btn copy-btn">复制上一帧</button>
+            <button id="resetBtn" class="action-btn reset-btn">重置当前帧</button>
+            <button id="exportBtn" class="action-btn export-btn">导出序列图像</button>
+        </div>
+    </div>
+</div>
+</body>
+
+</html>

@@ -1,0 +1,15 @@
+[project]
+name = "human-posture-visualization"
+version = "0.1.0"
+description = ""
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy==2.3.2",
+    "pyrender==0.1.45",
+    "torch==2.7.1",
+    "trimesh==4.7.1",
+    "pillow==11.3.0", # PIL
+    "flask==3.1.1",
+    "smplx==0.1.28",
+]
