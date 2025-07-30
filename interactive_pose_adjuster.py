@@ -308,13 +308,18 @@ class PoseAdjusterEngine:
         # 预测姿态的基础帧（考虑偏移）
         predicted_base_frame = frame_idx + self.frame_offset
 
-        # 确保偏移后的帧不超出数据范围
-        if predicted_base_frame < 0 or predicted_base_frame >= self.total_frames:
-            # 如果偏移超出范围，使用原始帧作为基础
-            predicted_base_frame = frame_idx
+        # 记录偏移信息（已禁用日志输出）
+        # if self.frame_offset != 0:
+        #     print(f'🔄 帧偏移: GT帧{frame_idx} → 预测帧{predicted_base_frame} (偏移{self.frame_offset})')
 
-        # 再次确保在有效范围内
-        predicted_base_frame = max(0, min(predicted_base_frame, self.total_frames - 1))
+        # 确保偏移后的帧在有效范围内
+        if predicted_base_frame < 0:
+            print(f'⚠️ 偏移帧{predicted_base_frame}小于0，调整为帧0')
+            predicted_base_frame = 0
+        elif predicted_base_frame >= self.total_frames:
+            print(
+                f'⚠️ 偏移帧{predicted_base_frame}超出范围(总帧数{self.total_frames})，调整为最后一帧{self.total_frames - 1}')
+            predicted_base_frame = self.total_frames - 1
 
         # 预测姿态始终从偏移后的基础帧开始
         poses_slice = self.poses[predicted_base_frame:predicted_base_frame + 1]
@@ -556,35 +561,11 @@ class PoseAdjusterEngine:
         # 设置环境光
         scene.ambient_light = [0.3, 0.3, 0.3]
 
-        # 获取当前帧的真实索引
-        real_frame_idx = self.frame_indices[frame_idx]
-
-        # 生成GT网格
-        gt_pose = self.poses[real_frame_idx]
-        if hasattr(gt_pose, 'clone'):
-            gt_pose = gt_pose.clone()  # PyTorch tensor
-        else:
-            gt_pose = torch.from_numpy(gt_pose.copy()).float()  # numpy array
-
-        # 处理betas参数 - betas通常是每个人固定的身体形状参数
-        if len(self.betas.shape) == 1:
-            # betas是1D数组，表示单个人的身体形状参数
-            betas_input = torch.from_numpy(self.betas[:10]).float().unsqueeze(0)
-        else:
-            # betas是2D数组，每一帧都有对应的betas
-            if real_frame_idx < self.betas.shape[0]:
-                betas_input = torch.from_numpy(self.betas[real_frame_idx:real_frame_idx + 1, :10]).float()
-            else:
-                # 如果索引超出范围，使用第一个betas
-                betas_input = torch.from_numpy(self.betas[0:1, :10]).float()
-
-        gt_body = self.model(
-            betas=betas_input,
-            body_pose=gt_pose[3:66].unsqueeze(0),
-            global_orient=gt_pose[:3].unsqueeze(0)
-        )
-        gt_vertices = gt_body.vertices[0].detach().cpu().numpy()
-        gt_mesh = trimesh.Trimesh(vertices=gt_vertices, faces=self.model.faces)
+        # 获取当前帧的GT和预测姿态（考虑帧偏移）
+        original_frame_idx = self.current_frame_idx
+        self.current_frame_idx = frame_idx  # 临时设置帧索引
+        gt_pose, predicted_pose = self.get_current_poses()
+        self.current_frame_idx = original_frame_idx  # 恢复原始帧索引
 
         # 获取材质配置
         render_config = config_manager.get_render_config()
@@ -597,43 +578,21 @@ class PoseAdjusterEngine:
             metallicFactor=gt_material_config['metallic'],
             roughnessFactor=gt_material_config['roughness']
         )
-        gt_mesh_pyrender = pyrender.Mesh.from_trimesh(gt_mesh, material=gt_material)
-        scene.add(gt_mesh_pyrender)
 
-        # 生成调节后的网格（如果有调节）
-        if frame_idx in self.adjusted_poses:
-            adjusted_pose = self.adjusted_poses[frame_idx]
+        # 预测材质（棕色半透明）
+        predicted_material = pyrender.MetallicRoughnessMaterial(
+            baseColorFactor=predicted_material_config['color'],
+            metallicFactor=predicted_material_config['metallic'],
+            roughnessFactor=predicted_material_config['roughness']
+        )
 
-            # 确保adjusted_pose有正确的维度
-            if adjusted_pose.shape[1] < 66:
-                # 如果维度不足，用GT姿态的后续维度补充
-                gt_pose_full = gt_pose.clone()
-                # 只替换前面已调节的部分
-                gt_pose_full[0, :adjusted_pose.shape[1]] = adjusted_pose[0, :]
-                adjusted_pose = gt_pose_full
+        # 生成GT网格（叠加显示）
+        gt_mesh = self.create_body_mesh(gt_pose, gt_material)
+        scene.add(gt_mesh)
 
-            # 确保维度正确后再进行切片
-            if adjusted_pose.shape[1] >= 66:
-                adjusted_body = self.model(
-                    betas=betas_input,  # 使用相同的betas参数
-                    body_pose=adjusted_pose[:, 3:66],  # 不再使用unsqueeze(0)
-                    global_orient=adjusted_pose[:, :3]  # 不再使用unsqueeze(0)
-                )
-            else:
-                # 维度仍不足，跳过调节后的渲染
-                adjusted_body = None
-            if adjusted_body is not None:
-                adjusted_vertices = adjusted_body.vertices[0].detach().cpu().numpy()
-                adjusted_mesh = trimesh.Trimesh(vertices=adjusted_vertices, faces=self.model.faces)
-
-                # 调节后材质（棕色半透明）
-                predicted_material = pyrender.MetallicRoughnessMaterial(
-                    baseColorFactor=predicted_material_config['color'],
-                    metallicFactor=predicted_material_config['metallic'],
-                    roughnessFactor=predicted_material_config['roughness']
-                )
-                adjusted_mesh_pyrender = pyrender.Mesh.from_trimesh(adjusted_mesh, material=predicted_material)
-                scene.add(adjusted_mesh_pyrender)
+        # 生成预测网格（叠加显示，始终渲染，显示帧偏移效果）
+        predicted_mesh = self.create_body_mesh(predicted_pose, predicted_material)
+        scene.add(predicted_mesh)
 
         # 获取光照配置
         lighting_config = render_config.lighting
