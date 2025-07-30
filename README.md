@@ -65,9 +65,9 @@ uv run python interactive_pose_adjuster.py
    ```
    models/
    ├── smpl/
-   │   ├── SMPL_MALE.pkl
-   │   ├── SMPL_FEMALE.pkl
-   │   └── SMPL_NEUTRAL.pkl
+   │   ├── SMPL_MALE.npz
+   │   ├── SMPL_FEMALE.npz
+   │   └── SMPL_NEUTRAL.npz
    └── smplx/
        ├── SMPLX_MALE.npz
        ├── SMPLX_FEMALE.npz

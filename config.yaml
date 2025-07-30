@@ -26,10 +26,10 @@ camera:
 # 模型文件配置
 models:
   smpl:
-    male: "./models/smpl/SMPL_MALE.pkl"
-    female: "./models/smpl/SMPL_FEMALE.pkl"
-    neutral: "./models/smpl/SMPL_NEUTRAL.pkl"
-  
+    male: "./models/smpl/SMPL_MALE.npz"
+    female: "./models/smpl/SMPL_FEMALE.npz"
+    neutral: "./models/smpl/SMPL_NEUTRAL.npz"
+
   smplx:
     male: "./models/smplx/SMPLX_MALE.npz"
     female: "./models/smplx/SMPLX_FEMALE.npz"
