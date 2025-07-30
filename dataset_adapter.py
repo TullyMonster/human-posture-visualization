@@ -462,8 +462,8 @@ class DatasetAdapter:
             num_frames = converted['poses'].shape[0]
             converted['trans'] = np.zeros((num_frames, 3), dtype=np.float32)
 
-        # 默认属性
-        converted['gender'] = 'neutral'
+        # 默认属性（注意：这里的gender是数据的性别属性，不影响模型选择）
+        converted['gender'] = 'neutral'  
         converted['mocap_framerate'] = 30.0
 
         print(f'✅ SMPL格式转换完成: {converted["poses"].shape[0]}帧, {converted["poses"].shape[1]}维')
@@ -643,7 +643,7 @@ class DatasetAdapter:
         # 全局平移（注意键名是transl）
         converted['trans'] = data['transl'].astype(np.float32)
 
-        # 性别信息（HuMMan通常没有，使用默认值）
+        # 性别信息（HuMMan通常没有，使用默认值，注意：这是数据的性别属性）
         converted['gender'] = 'neutral'
 
         # 帧率信息

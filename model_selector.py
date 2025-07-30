@@ -156,9 +156,12 @@ class ModelSelector:
     def _select_best_gender(self, candidates: List[ModelConfig], preferred_gender: str) -> ModelConfig:
         """从候选模型中选择最佳性别匹配"""
 
+        # 统一转换为大写进行匹配
+        preferred_gender_upper = preferred_gender.upper()
+        
         # 首先尝试精确匹配
         for config in candidates:
-            if config.gender == preferred_gender:
+            if config.gender == preferred_gender_upper:
                 return config
 
         # 如果没有精确匹配，按优先级选择
