@@ -290,7 +290,6 @@ class PoseAdjusterEngine:
 
         # 确保帧索引在数据范围内
         if frame_idx >= self.total_frames:
-            print(f'⚠️ 数据帧索引越界: frame_idx={frame_idx}, total_frames={self.total_frames}')
             frame_idx = self.total_frames - 1
 
         # 调试信息已简化
@@ -310,14 +309,14 @@ class PoseAdjusterEngine:
             # 使用最后一个有效帧
             valid_frame_idx = min(frame_idx, self.total_frames - 1)
             gt_pose = torch.tensor(self.poses[valid_frame_idx:valid_frame_idx + 1], dtype=torch.float32)
-            print(f'🔧 使用有效帧: {valid_frame_idx}')
+
 
         # 预测姿态的基础帧（考虑偏移）
         predicted_base_frame = frame_idx + self.frame_offset
 
         # 确保偏移后的帧在有效范围内
         if predicted_base_frame < 0:
-            print(f'⚠️ 偏移帧{predicted_base_frame}小于0，调整为帧0')
+
             predicted_base_frame = 0
         elif predicted_base_frame >= self.total_frames:
             print(
@@ -335,10 +334,8 @@ class PoseAdjusterEngine:
 
         # 验证predicted_pose的维度
         if predicted_pose.shape[0] == 0:
-            print(f'❌ 预测姿态为空: predicted_base_frame={predicted_base_frame}')
             # 使用GT姿态作为备选
             predicted_pose = gt_pose.clone()
-            print(f'🔧 使用GT姿态作为预测姿态')
 
         # 如果当前帧有用户调节，这些调节应该是存储为相对于GT的修改
         # 我们需要将这些修改应用到预测基础姿态上
@@ -527,8 +524,6 @@ class PoseAdjusterEngine:
 
         except Exception as e:
             print(f'❌ 模型调用失败: {str(e)}')
-            print(f'🔧 尝试回退到SMPL兼容模式...')
-
             # 回退策略：只使用身体关节
             try:
                 output = self.model(
@@ -537,9 +532,7 @@ class PoseAdjusterEngine:
                     body_pose=pose[:, 3:66],
                     transl=transl
                 )
-                print(f'✅ 回退模式成功')
             except Exception as fallback_error:
-                print(f'❌ 回退模式也失败: {str(fallback_error)}')
                 raise fallback_error
 
         vertices = output.vertices.detach().cpu().numpy().squeeze()
@@ -986,8 +979,8 @@ def api_update_sequence():
         if frame_interval < 1:
             return jsonify({'success': False, 'error': '帧间隔必须大于0'})
 
-        if num_frames < 1 or num_frames > 20:
-            return jsonify({'success': False, 'error': '帧数必须在1-20范围内'})
+        if num_frames < 1:
+            return jsonify({'success': False, 'error': '帧数必须大于0'})
 
         # 检查序列是否超出数据范围
         max_frame = start_frame + (num_frames - 1) * frame_interval

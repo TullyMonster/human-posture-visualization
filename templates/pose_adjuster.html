@@ -123,36 +123,57 @@
             display: flex;
             flex-direction: column;
             align-items: center;
-            padding: 15px 20px;
+            padding: 8px 15px;
             box-shadow: 0 2px 15px rgba(0, 0, 0, 0.1);
             z-index: 100;
-            min-height: 200px;
-            max-height: 50vh;
-            overflow-y: auto;
+            height: 370px; /* 进一步减少总高度，压缩底部空白空间 */
+            overflow: hidden;
+        }
+
+        .image-scroll-container {
+            width: 100%;
+            height: 310px; /* 减少高度，压缩空白空间 */
+            overflow-x: auto;
+            overflow-y: hidden;
+            display: flex;
+            flex-direction: column;
+            border-radius: 8px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+        }
+
+        .image-scroll-content {
+            display: block; /* 改为block布局 */
+            padding-bottom: 10px;
+            position: relative;
         }
 
         .render-image {
-            max-width: 100%;
-            max-height: 300px;
-            border-radius: 8px;
-            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+            height: 265px;
+            width: auto;
             object-fit: contain;
+            border-radius: 8px 8px 0 0;
+            display: block; /* 确保图片是块级元素 */
         }
 
         .frame-numbers {
             display: flex;
-            justify-content: center;
-            margin: 8px auto;
+            justify-content: flex-start;
+            margin: 0;
             gap: 0;
+            height: 35px;
+            border-radius: 0 0 8px 8px;
+            box-sizing: border-box;
+            overflow: hidden;
+            position: relative; /* 相对定位 */
         }
 
         .frame-number-btn {
-            min-width: 20px;
-            height: 25px;
+            min-width: 30px;
+            height: 35px;
             border: 1px solid #ddd;
             background: #f8f9fa;
             color: #333;
-            font-size: 11px;
+            font-size: 13px;
             font-weight: 500;
             cursor: pointer;
             transition: all 0.2s ease;
@@ -161,6 +182,9 @@
             justify-content: center;
             border-radius: 0;
             flex-shrink: 0;
+            box-sizing: border-box; /* 确保width包含border和padding */
+            margin: 0;
+            padding: 0;
         }
 
         .frame-number-btn:first-child {
@@ -186,11 +210,11 @@
         }
 
         .render-controls {
-            margin-top: 15px;
+            margin-top: 3px;
             display: flex;
             align-items: center;
             justify-content: center;
-            gap: 20px;
+            gap: 15px;
             flex-wrap: wrap;
         }
 
@@ -262,7 +286,7 @@
 
         .control-panel {
             background: white;
-            padding: 20px;
+            padding: 15px;
             margin-top: 0; /* 完全由JavaScript动态计算 */
             border-radius: 12px;
             box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
@@ -272,10 +296,10 @@
         }
 
         .panel-title {
-            font-size: 24px;
+            font-size: 22px;
             font-weight: 700;
             color: #333;
-            margin-bottom: 15px;
+            margin-bottom: 10px;
             text-align: center;
         }
 
@@ -526,10 +550,14 @@
 <div class="container">
     <!-- 顶部：多帧预览区域 -->
     <div class="render-area">
-        <img id="renderImage" class="render-image" src="" alt="正在加载...">
-        
-        <!-- 帧数字导航条 -->
-        <div id="frameNumbers" class="frame-numbers"></div>
+        <div class="image-scroll-container" id="imageScrollContainer">
+            <div class="image-scroll-content" id="imageScrollContent">
+                <img alt="正在加载..." class="render-image" id="renderImage" src="">
+
+                <!-- 帧数字导航条 -->
+                <div class="frame-numbers" id="frameNumbers"></div>
+            </div>
+        </div>
         
         <div class="render-controls">
             <div class="params-config">

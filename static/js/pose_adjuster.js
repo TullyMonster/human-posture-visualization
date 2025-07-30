@@ -81,7 +81,7 @@ class PoseAdjuster {
             const response = await fetch('/static/joint_config.json');
             const data = await response.json();
             this.jointConfigs = data.core_joints;
-            console.log('关节配置加载成功:', Object.keys(this.jointConfigs));
+    
         } catch (error) {
             console.error('关节配置加载失败:', error);
             throw new Error('无法加载关节配置，请检查 joint_config.json 文件');
@@ -558,10 +558,10 @@ class PoseAdjuster {
      */
     addInputValidation() {
         const inputConfigs = [
-            { id: 'startFrameInput', min: 0, max: 500, name: '起始帧' },
-            { id: 'frameIntervalInput', min: 1, max: 50, name: '帧间隔' },
-            { id: 'numFramesInput', min: 1, max: 20, name: '帧数' },
-            { id: 'frameOffsetInput', min: -100, max: 100, name: '帧偏移' }
+            { id: 'startFrameInput', min: 0, name: '起始帧' },
+            { id: 'frameIntervalInput', min: 1, name: '帧间隔' },
+            { id: 'numFramesInput', min: 1, name: '帧数' },
+            { id: 'frameOffsetInput', min: -1000, name: '帧偏移' }
         ];
 
         inputConfigs.forEach(config => {
@@ -573,7 +573,7 @@ class PoseAdjuster {
                 e.stopPropagation(); // 阻止事件冒泡，但不阻止默认行为
             });
 
-            // 实时验证输入值
+            // 实时验证输入值（仅检查最小值，移除最大值限制）
             input.addEventListener('input', (e) => {
                 let value = parseInt(e.target.value);
                 
@@ -581,10 +581,7 @@ class PoseAdjuster {
                 
                 if (value < config.min) {
                     e.target.value = config.min;
-                    this.showInputWarning(e.target, `${config.name}最小值为${config.min}`);
-                } else if (value > config.max) {
-                    e.target.value = config.max;
-                    this.showInputWarning(e.target, `${config.name}最大值为${config.max}`);
+                    this.updateStatusInfo('error', `${config.name}最小值为${config.min}`);
                 }
                 
                 // 更新应用按钮状态
@@ -596,37 +593,12 @@ class PoseAdjuster {
                 let value = parseInt(e.target.value);
                 if (isNaN(value) || value < config.min) {
                     e.target.value = config.min;
-                } else if (value > config.max) {
-                    e.target.value = config.max;
                 }
             });
         });
     }
 
-    /**
-     * 显示输入框警告提示
-     */
-    showInputWarning(inputElement, message) {
-        // 移除已存在的警告
-        const existingWarning = inputElement.parentNode.querySelector('.input-warning');
-        if (existingWarning) {
-            existingWarning.remove();
-        }
 
-        // 创建新的警告提示
-        const warning = document.createElement('div');
-        warning.className = 'input-warning';
-        warning.textContent = message;
-        
-        inputElement.parentNode.appendChild(warning);
-        
-        // 3秒后自动移除
-        setTimeout(() => {
-            if (warning.parentNode) {
-                warning.remove();
-            }
-        }, 3000);
-    }
 
     /**
      * 为参数输入框添加滚轮支持和状态管理
@@ -1146,7 +1118,7 @@ class PoseAdjuster {
         }
     }
 
-    updateFrameInfo(frameIdx, frameCount) {
+    async updateFrameInfo(frameIdx, frameCount) {
         // 只禁用复制上一帧按钮（当在第一帧时）
         const copyPrevBtn = document.getElementById('copyPrevBtn');
         if (copyPrevBtn) {
@@ -1154,7 +1126,7 @@ class PoseAdjuster {
         }
         
         // 生成帧数字按钮
-        this.generateFrameNumbers(frameIdx, frameCount);
+        await this.generateFrameNumbers(frameIdx, frameCount);
     }
 
     updateFrameStatus(modified) {
@@ -1164,22 +1136,62 @@ class PoseAdjuster {
         }
     }
 
-    generateFrameNumbers(currentFrameIdx, frameCount) {
+    async generateFrameNumbers(currentFrameIdx, frameCount) {
         const frameNumbersContainer = document.getElementById('frameNumbers');
         const renderImage = document.getElementById('renderImage');
-        if (!frameNumbersContainer || !renderImage) return;
+        const imageScrollContent = document.getElementById('imageScrollContent');
+        if (!frameNumbersContainer || !renderImage || !imageScrollContent) return;
 
         // 清空现有按钮
         frameNumbersContainer.innerHTML = '';
 
-        // 获取图片的实际显示宽度
-        const imageDisplayWidth = renderImage.clientWidth;
+        // 强制等待图片布局完成
+        await new Promise(resolve => {
+            if (renderImage.complete && renderImage.naturalWidth !== 0) {
+                resolve();
+            } else {
+                renderImage.onload = resolve;
+                renderImage.onerror = resolve;
+                setTimeout(resolve, 1000); // 最多等待1秒
+            }
+        });
+
+        // 获取图片的真实渲染宽度
+        const imageDisplayWidth = renderImage.offsetWidth || renderImage.getBoundingClientRect().width;
         
-        // 计算每个按钮的宽度（减去边框宽度）
-        const buttonWidth = Math.floor(imageDisplayWidth / frameCount) - 1;
+
         
-        // 设置容器宽度与图片宽度一致
+        // 确保图片宽度有效
+        if (imageDisplayWidth === 0 || imageDisplayWidth < 100) {
+            setTimeout(() => this.generateFrameNumbers(currentFrameIdx, frameCount), 200);
+            return;
+        }
+
+        // 获取滚动容器宽度，用于判断是否需要居中
+        const scrollContainer = document.getElementById('imageScrollContainer');
+        const containerWidth = scrollContainer ? scrollContainer.clientWidth : window.innerWidth;
+        
+        // 设置滚动内容容器宽度等于图片宽度
+        imageScrollContent.style.width = `${imageDisplayWidth}px`;
+        
+        // 如果图片宽度小于容器宽度，居中显示；否则左对齐
+        if (imageDisplayWidth < containerWidth) {
+            imageScrollContent.style.margin = '0 auto';
+        } else {
+            imageScrollContent.style.margin = '0';
+        }
+
+        // 帧导航容器宽度必须与图片宽度完全一致 - 使用所有可能的CSS属性
         frameNumbersContainer.style.width = `${imageDisplayWidth}px`;
+        frameNumbersContainer.style.minWidth = `${imageDisplayWidth}px`;
+        frameNumbersContainer.style.maxWidth = `${imageDisplayWidth}px`;
+        frameNumbersContainer.style.flexBasis = `${imageDisplayWidth}px`;
+        frameNumbersContainer.style.boxSizing = 'border-box';
+
+        // 按钮宽度计算：考虑边框，确保按钮总宽度等于图片宽度
+        // 由于按钮使用box-sizing: border-box，设置的width包含border
+        const baseButtonWidth = Math.floor(imageDisplayWidth / frameCount);
+        const remainder = imageDisplayWidth % frameCount;
 
         // 为每一帧生成数字按钮
         for (let i = 0; i < frameCount; i++) {
@@ -1187,6 +1199,11 @@ class PoseAdjuster {
             btn.className = 'frame-number-btn';
             btn.textContent = (i + 1).toString();
             btn.dataset.frameIndex = i.toString();
+            
+
+            
+            // 按钮宽度分配，确保完全填满容器
+            const buttonWidth = i < remainder ? baseButtonWidth + 1 : baseButtonWidth;
             btn.style.width = `${buttonWidth}px`;
             
             // 高亮当前帧
@@ -1199,6 +1216,29 @@ class PoseAdjuster {
             
             frameNumbersContainer.appendChild(btn);
         }
+        
+
+
+        // 验证按钮总宽度是否等于图片宽度，如果不等则强制调整
+        setTimeout(() => {
+            let totalButtonWidth = 0;
+            const buttons = frameNumbersContainer.querySelectorAll('.frame-number-btn');
+            buttons.forEach(btn => {
+                totalButtonWidth += btn.offsetWidth;
+            });
+            
+            
+            if (Math.abs(totalButtonWidth - imageDisplayWidth) > 1) {
+                // 重新计算每个按钮的精确宽度
+                const exactButtonWidth = imageDisplayWidth / frameCount;
+                buttons.forEach((btn, index) => {
+                    const startX = Math.round(index * exactButtonWidth);
+                    const endX = Math.round((index + 1) * exactButtonWidth);
+                    const buttonWidth = endX - startX;
+                    btn.style.width = `${buttonWidth}px`;
+                });
+            }
+        }, 10);
     }
 
     async jumpToFrame(targetFrameIdx) {
@@ -1229,37 +1269,84 @@ class PoseAdjuster {
     adjustFrameNumbersWidth() {
         const frameNumbersContainer = document.getElementById('frameNumbers');
         const renderImage = document.getElementById('renderImage');
-        if (!frameNumbersContainer || !renderImage) return;
+        const imageScrollContent = document.getElementById('imageScrollContent');
+        if (!frameNumbersContainer || !renderImage || !imageScrollContent) return;
 
         const frameNumberBtns = frameNumbersContainer.querySelectorAll('.frame-number-btn');
         if (frameNumberBtns.length === 0) return;
 
-        // 获取图片的实际显示宽度
-        const imageDisplayWidth = renderImage.clientWidth;
+        // 获取图片的真实渲染宽度
+        const imageDisplayWidth = renderImage.offsetWidth || renderImage.getBoundingClientRect().width;
         
         // 如果图片宽度为0，等待图片加载
-        if (imageDisplayWidth === 0) {
-            setTimeout(() => this.adjustFrameNumbersWidth(), 100);
+        if (imageDisplayWidth === 0 || imageDisplayWidth < 100) {
+            setTimeout(() => this.adjustFrameNumbersWidth(), 200);
             return;
         }
         
-        // 计算每个按钮的宽度
-        const buttonWidth = Math.floor(imageDisplayWidth / frameNumberBtns.length) - 1;
+
         
-        // 设置容器宽度与图片宽度一致
+        // 获取滚动容器宽度，用于判断是否需要居中
+        const scrollContainer = document.getElementById('imageScrollContainer');
+        const containerWidth = scrollContainer ? scrollContainer.clientWidth : window.innerWidth;
+        
+        // 设置滚动内容容器宽度
+        imageScrollContent.style.width = `${imageDisplayWidth}px`;
+        
+        // 如果图片宽度小于容器宽度，居中显示；否则左对齐
+        if (imageDisplayWidth < containerWidth) {
+            imageScrollContent.style.margin = '0 auto';
+        } else {
+            imageScrollContent.style.margin = '0';
+        }
+
+        // 强制设置帧导航容器的所有宽度属性，确保与图片完全一致
         frameNumbersContainer.style.width = `${imageDisplayWidth}px`;
+        frameNumbersContainer.style.minWidth = `${imageDisplayWidth}px`;
+        frameNumbersContainer.style.maxWidth = `${imageDisplayWidth}px`;
+        frameNumbersContainer.style.flexBasis = `${imageDisplayWidth}px`;
+        frameNumbersContainer.style.boxSizing = 'border-box';
+
+        // 按钮宽度计算：考虑边框，确保按钮总宽度等于图片宽度
+        // 由于按钮使用box-sizing: border-box，设置的width包含border
+        const frameCount = frameNumberBtns.length;
+        const baseButtonWidth = Math.floor(imageDisplayWidth / frameCount);
+        const remainder = imageDisplayWidth % frameCount;
 
         // 更新每个按钮的宽度
-        frameNumberBtns.forEach(btn => {
+        frameNumberBtns.forEach((btn, index) => {
+            // 按钮宽度分配，确保完全填满容器
+            const buttonWidth = index < remainder ? baseButtonWidth + 1 : baseButtonWidth;
             btn.style.width = `${buttonWidth}px`;
         });
+
+        // 验证按钮总宽度是否等于图片宽度，如果不等则强制调整
+        setTimeout(() => {
+            let totalButtonWidth = 0;
+            frameNumberBtns.forEach(btn => {
+                totalButtonWidth += btn.offsetWidth;
+            });
+            
+            
+            if (Math.abs(totalButtonWidth - imageDisplayWidth) > 1) {
+                // 重新计算每个按钮的精确宽度
+                const exactButtonWidth = imageDisplayWidth / frameCount;
+                frameNumberBtns.forEach((btn, index) => {
+                    const startX = Math.round(index * exactButtonWidth);
+                    const endX = Math.round((index + 1) * exactButtonWidth);
+                    const buttonWidth = endX - startX;
+                    btn.style.width = `${buttonWidth}px`;
+                });
+            }
+        }, 10);
     }
 
     checkAndAdjustFrameNumbers() {
         const frameNumbersContainer = document.getElementById('frameNumbers');
         const renderImage = document.getElementById('renderImage');
+        const imageScrollContent = document.getElementById('imageScrollContent');
         
-        if (!frameNumbersContainer || !renderImage) {
+        if (!frameNumbersContainer || !renderImage || !imageScrollContent) {
             // 如果元素还没有准备好，再次尝试
             setTimeout(() => this.checkAndAdjustFrameNumbers(), 200);
             return;
@@ -1362,10 +1449,10 @@ async function updateSequence() {
 
         const data = await response.json();
         if (data.success) {
-            // 显示成功消息
-            const statusFloat = document.querySelector('.status-float');
-            statusFloat.textContent = '✓ 参数更新成功';
-            statusFloat.className = 'status-float show';
+            // 使用统一的状态提示显示成功消息
+            if (app) {
+                app.updateStatusInfo('success', '参数更新成功');
+            }
             
             // 强制清除图像缓存
             const renderImage = document.getElementById('renderImage');
@@ -1383,40 +1470,45 @@ async function updateSequence() {
                 }
             }, 100);
 
+            // 重置滚动位置到左上角，并重新调整布局
+            const imageScrollContainer = document.getElementById('imageScrollContainer');
+            if (imageScrollContainer) {
+
+                imageScrollContainer.scrollLeft = 0;
+                imageScrollContainer.scrollTop = 0;
+            }
+
+            // 等待图片完全更新后再调整帧导航按钮
+            setTimeout(() => {
+                if (app) {
+                    app.adjustFrameNumbersWidth();
+                    // 多次调整确保同步
+                    setTimeout(() => app.adjustFrameNumbersWidth(), 100);
+                    setTimeout(() => app.adjustFrameNumbersWidth(), 300);
+                }
+            }, 500);
+
             app.adjustControlPanelPosition();
             
             // 更新成功后重置原始参数值
             if (app) {
                 app.resetOriginalParams();
             }
-            
-            // 隐藏状态提示
-            setTimeout(() => {
-                statusFloat.className = 'status-float';
-            }, 3000);
+
         } else {
-            // 显示错误消息
-            const statusFloat = document.querySelector('.status-float');
-            statusFloat.textContent = '✗ ' + data.error;
-            statusFloat.className = 'status-float show error';
-            
-            setTimeout(() => {
-                statusFloat.className = 'status-float';
-            }, 5000);
-            
-            console.error('参数更新失败:', data.error);
+            // 使用统一的状态提示显示错误消息
+            if (app) {
+                app.updateStatusInfo('error', data.error);
+            }
+
         }
     } catch (error) {
-        console.error('参数更新失败:', error);
+
         
-        // 显示网络错误
-        const statusFloat = document.querySelector('.status-float');
-        statusFloat.textContent = '✗ 网络请求失败';
-        statusFloat.className = 'status-float show error';
-        
-        setTimeout(() => {
-            statusFloat.className = 'status-float';
-        }, 5000);
+        // 使用统一的状态提示显示网络错误
+        if (app) {
+            app.updateStatusInfo('error', '网络请求失败');
+        }
     } finally {
         // 恢复按钮状态
         applyBtn.disabled = false;
