@@ -409,8 +409,148 @@ class PoseAdjuster {
             }
         });
 
+        // 底部功能按钮事件绑定
+        this.initBottomButtons();
+
         // 添加输入框实时验证
         this.addInputValidation();
+    }
+
+    /**
+     * 初始化底部功能按钮的事件监听器
+     */
+    initBottomButtons() {
+        // 复制上一帧按钮
+        const copyPrevBtn = document.getElementById('copyPrevBtn');
+        if (copyPrevBtn) {
+            copyPrevBtn.addEventListener('click', () => this.copyPrevFrame());
+        }
+
+        // 重置当前帧按钮
+        const resetBtn = document.getElementById('resetBtn');
+        if (resetBtn) {
+            resetBtn.addEventListener('click', () => this.resetCurrentFrame());
+        }
+
+        // 导出序列图像按钮
+        const exportBtn = document.getElementById('exportBtn');
+        if (exportBtn) {
+            exportBtn.addEventListener('click', () => this.exportSequenceImages());
+        }
+    }
+
+    /**
+     * 复制上一帧的调节参数
+     */
+    async copyPrevFrame() {
+        if (this.currentFrame === 0) {
+            this.updateStatusInfo('error', '当前已是第一帧，无法复制上一帧参数');
+            return;
+        }
+
+        this.setLoading(true);
+        this.updateStatusInfo('loading', '正在复制上一帧参数...');
+
+        try {
+            const response = await fetch('/api/copy_prev', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            });
+
+            const result = await response.json();
+            if (result.success) {
+                // 重新渲染并更新角度显示
+                document.getElementById('renderImage').src = result.image;
+                this.updateFrameStatus(result.modified);
+                await this.loadCurrentAngles();
+                this.updateStatusInfo('success', '复制上一帧参数成功');
+            } else {
+                this.updateStatusInfo('error', '复制失败: ' + result.error);
+            }
+        } catch (error) {
+            console.error('复制上一帧失败:', error);
+            this.updateStatusInfo('error', '复制失败: ' + error.message);
+        } finally {
+            this.setLoading(false);
+        }
+    }
+
+    /**
+     * 重置当前帧的所有调节
+     */
+    async resetCurrentFrame() {
+        if (!confirm('确定要重置当前帧的所有调节吗？此操作不可撤销。')) {
+            return;
+        }
+
+        this.setLoading(true);
+        this.updateStatusInfo('loading', '正在重置当前帧...');
+
+        try {
+            const response = await fetch('/api/reset', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            });
+
+            const result = await response.json();
+            if (result.success) {
+                // 重新渲染并更新角度显示
+                document.getElementById('renderImage').src = result.image;
+                this.updateFrameStatus(result.modified);
+                await this.loadCurrentAngles();
+                // 清除修改状态
+                this.modifiedJoints.clear();
+                this.updateAllResetButtonStates(false);
+                this.updateStatusInfo('success', '重置当前帧成功');
+            } else {
+                this.updateStatusInfo('error', '重置失败: ' + result.error);
+            }
+        } catch (error) {
+            console.error('重置当前帧失败:', error);
+            this.updateStatusInfo('error', '重置失败: ' + error.message);
+        } finally {
+            this.setLoading(false);
+        }
+    }
+
+    /**
+     * 导出序列图像
+     */
+    async exportSequenceImages() {
+        this.setLoading(true);
+        this.updateStatusInfo('loading', '正在导出序列图像...');
+
+        try {
+            const response = await fetch('/api/export');
+            
+            if (!response.ok) {
+                throw new Error('导出请求失败');
+            }
+
+            const result = await response.json();
+            if (result.success) {
+                // 创建下载链接
+                const link = document.createElement('a');
+                link.href = result.image;
+                link.download = result.filename || 'pose_sequence.png';
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                
+                this.updateStatusInfo('success', '序列图像导出成功');
+            } else {
+                this.updateStatusInfo('error', '导出失败: ' + (result.error || '未知错误'));
+            }
+        } catch (error) {
+            console.error('导出序列图像失败:', error);
+            this.updateStatusInfo('error', '导出失败: ' + error.message);
+        } finally {
+            this.setLoading(false);
+        }
     }
 
     /**
@@ -918,6 +1058,9 @@ class PoseAdjuster {
 
             const data = await response.json();
             if (data.success) {
+                // 更新前端的当前帧索引
+                this.currentFrame = data.frame_idx;
+                
                 document.getElementById('renderImage').src = data.image;
                 this.updateFrameInfo(data.frame_idx, data.frame_count);
                 this.updateFrameStatus(data.modified);
@@ -928,6 +1071,9 @@ class PoseAdjuster {
                 // 导航时清除修改标记
                 this.modifiedJoints.clear();
                 this.updateAllResetButtonStates(false);
+                
+                // 确保数字按钮状态正确 - 立即更新高亮
+                this.updateFrameButtonHighlight(data.frame_idx);
                 
                 // 确保数字按钮宽度正确
                 setTimeout(() => {
@@ -941,53 +1087,7 @@ class PoseAdjuster {
         }
     }
 
-    async copyPrevFrame() {
-        this.setLoading(true);
 
-        try {
-            const response = await fetch('/api/copy_prev', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'}
-            });
-
-            const data = await response.json();
-            if (data.success) {
-                document.getElementById('renderImage').src = data.image;
-                this.updateFrameStatus(data.modified);
-
-                // 重新获取最新的角度值
-                await this.loadCurrentAngles();
-            }
-        } catch (error) {
-            console.error('复制上一帧失败:', error);
-        } finally {
-            this.setLoading(false);
-        }
-    }
-
-    async reset() {
-        this.setLoading(true);
-
-        try {
-            const response = await fetch('/api/reset', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'}
-            });
-
-            const data = await response.json();
-            if (data.success) {
-                document.getElementById('renderImage').src = data.image;
-                this.updateFrameStatus(data.modified);
-
-                // 重新获取最新的角度值
-                await this.loadCurrentAngles();
-            }
-        } catch (error) {
-            console.error('重置失败:', error);
-        } finally {
-            this.setLoading(false);
-        }
-    }
 
     /**
      * 更新所有重置按钮状态
@@ -1005,22 +1105,7 @@ class PoseAdjuster {
         });
     }
 
-    async export() {
-        try {
-            const response = await fetch('/api/export');
-            const data = await response.json();
 
-            if (data.success) {
-                // 下载图像
-                const link = document.createElement('a');
-                link.href = data.image;
-                link.download = data.filename;
-                link.click();
-            }
-        } catch (error) {
-            console.error('导出失败:', error);
-        }
-    }
 
     async render() {
         this.setLoading(true);
@@ -1030,6 +1115,9 @@ class PoseAdjuster {
             const data = await response.json();
 
             if (data.success) {
+                // 同步前端当前帧索引
+                this.currentFrame = data.frame_idx;
+                
                 // 添加时间戳参数防止缓存
                 const imageUrl = data.image + (data.timestamp ? `#${data.timestamp}` : `#${Date.now()}`);
                 document.getElementById('renderImage').src = imageUrl;
@@ -1040,12 +1128,14 @@ class PoseAdjuster {
                 // 获取并显示当前帧的GT角度
                 await this.loadCurrentAngles();
 
-                // 图像加载完成后调整控制面板位置和重新生成数字按钮
+                // 图像加载完成后调整控制面板位置
                 document.getElementById('renderImage').onload = () => {
                     setTimeout(() => {
                         this.forceAdjustPosition(); // 使用强制调整
-                        // 重新生成数字按钮以确保宽度正确
-                        this.generateFrameNumbers(data.frame_idx, data.frame_count);
+                        // 只调整按钮宽度，不重新生成按钮（避免覆盖高亮状态）
+                        this.adjustFrameNumbersWidth();
+                        // 确保高亮状态正确
+                        this.updateFrameButtonHighlight(this.currentFrame);
                     }, 100);
                 };
             }
@@ -1117,6 +1207,23 @@ class PoseAdjuster {
         } catch (error) {
             console.error('跳转到帧失败:', error);
         }
+    }
+
+    /**
+     * 更新帧数字按钮的高亮状态（不重新生成按钮）
+     */
+    updateFrameButtonHighlight(currentFrameIdx) {
+        const frameNumbersContainer = document.getElementById('frameNumbers');
+        if (!frameNumbersContainer) return;
+
+        const frameNumberBtns = frameNumbersContainer.querySelectorAll('.frame-number-btn');
+        frameNumberBtns.forEach((btn, index) => {
+            if (index === currentFrameIdx) {
+                btn.classList.add('active');
+            } else {
+                btn.classList.remove('active');
+            }
+        });
     }
 
     adjustFrameNumbersWidth() {

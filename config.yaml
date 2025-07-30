@@ -1,0 +1,66 @@
+# 人体姿态可视化项目配置文件
+
+# 数据集配置
+dataset:
+  path: "./datasets/3DPW/courtyard_basketball_00.pkl"
+  type: "3DPW"            # 数据集类型，用于自动选择适配器
+  gender: "neutral"        # 性别: male/female/neutral
+
+# 帧序列参数
+frames:
+  start_frame: 10          # 起始帧
+  frame_interval: 5        # 帧间隔
+  num_frames: 3            # 显示帧数（超出数据范围时会自动调整）
+  frame_offset: 0          # 帧偏移
+  time_interval_ms: 100    # 目标时间间隔（毫秒），-1表示使用手动帧间隔
+
+# 相机配置
+camera:
+  matrix: [
+    [ 0.7575021133103667, 0.026417531429752537, -0.6522979334323108, -1.7093452899420827 ],
+    [ 0.10934172881612209, 0.9799325457153288, 0.16666310558176073, -0.19852564784832644 ],
+    [ 0.6436107639408651, -0.19757105020987742, 0.7394124797958037, 1.318489416402518 ],
+    [ 0.0, 0.0, 0.0, 1.0 ],
+  ]
+
+# 模型文件配置
+models:
+  smpl:
+    male: "./models/smpl/SMPL_MALE.pkl"
+    female: "./models/smpl/SMPL_FEMALE.pkl"
+    neutral: "./models/smpl/SMPL_NEUTRAL.pkl"
+  
+  smplx:
+    male: "./models/smplx/SMPLX_MALE.npz"
+    female: "./models/smplx/SMPLX_FEMALE.npz"
+    neutral: "./models/smplx/SMPLX_NEUTRAL.npz"
+
+# 渲染配置
+rendering:
+  width: 1200
+  height: 1200
+  
+  # 材质配置
+  materials:
+    gt: # Ground Truth材质
+      color: [ 0.29, 0.33, 0.60, 0.7 ]  # 蓝色，半透明
+      metallic: 0.2
+      roughness: 0.6
+    
+    predicted: # 预测/调节后材质
+      color: [ 0.60, 0.33, 0.29, 0.8 ]  # 棕色，半透明
+      metallic: 0.2
+      roughness: 0.6
+  
+  # 光照配置
+  lighting:
+    ambient: [ 0.3, 0.3, 0.3 ]          # 环境光
+    directional_intensity: 3.0         # 主光源强度
+    fill_light_intensity: 2.0          # 补充光强度
+    fill_light_color: [ 0.8, 0.8, 0.9 ] # 补充光颜色
+
+# Web服务器配置
+server:
+  host: "0.0.0.0"
+  port: 5000
+  debug: false

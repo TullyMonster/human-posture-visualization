@@ -1,7 +1,7 @@
 [project]
 name = "human-posture-visualization"
 version = "0.1.0"
-description = ""
+description = "Interactive 3D human posture visualization and editing tool with support for SMPL/SMPLX models"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -12,4 +12,6 @@ dependencies = [
     "pillow==11.3.0", # PIL
     "flask==3.1.1",
     "smplx==0.1.28",
+    "pyyaml==6.0.2",
+    "watchdog==6.0.0",
 ]

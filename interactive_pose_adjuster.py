@@ -1,8 +1,12 @@
 """
 交互式人体姿态调节器
 基于Flask + pyrender实现Web端SMPLX姿态调节
+支持多种数据集格式：AMASS (SMPLX), 3DPW (SMPL), HuMMan (SMPL)
+使用YAML配置文件管理所有参数，无硬编码路径
+支持配置文件热重载功能
 """
 
+import atexit
 import base64
 import io
 import json
@@ -17,22 +21,56 @@ import torch
 import trimesh
 from PIL import Image
 from flask import Flask, request, jsonify, render_template
-from smplx import SMPLX
 
-# ==================== 配置常量 ====================
-# 数据集文件：包含人体动作序列的姿态参数
-# 要求：NPZ格式，包含poses[T,156]和betas[10]数组
-# T=帧数，156=SMPLX参数维度（global_orient+body_pose+hand_poses）
-DATA_SET: Path = Path(r'./datasets/AMASS/G18 push kick right poses.npz')
+from config_manager import get_config_manager, DatasetConfig
+# 导入数据集适配器、模型选择器和配置管理器
+from dataset_adapter import DatasetAdapter
 
-# SMPLX人体模型文件：定义人体网格拓扑和蒙皮权重
-# 支持：MALE/FEMALE/NEUTRAL，影响体型和比例
-SMPL_MODEL: Path = Path(r'./models/smplx/SMPLX_MALE.npz')
+# ==================== 配置初始化 ====================
+# 获取全局配置管理器
+config_manager = get_config_manager()
 
-# 渲染配置：单帧图像分辨率
-# 序列图像总宽度 = RENDER_WIDTH × 帧数
-RENDER_WIDTH = 1200
-RENDER_HEIGHT = 1200
+# 全局变量，将在初始化函数中设置
+dataset_config = None
+render_config = None
+RENDER_WIDTH = None
+RENDER_HEIGHT = None
+engine = None
+_cleanup_registered = False  # 防止重复注册退出清理
+
+
+def load_global_config():
+    """加载全局配置变量"""
+    global dataset_config, render_config, RENDER_WIDTH, RENDER_HEIGHT
+
+    # 从配置文件获取当前数据集和渲染配置
+    dataset_config = config_manager.get_current_dataset_config()
+    render_config = config_manager.get_render_config()
+
+    # 渲染配置：从配置文件获取
+    RENDER_WIDTH = render_config.width
+    RENDER_HEIGHT = render_config.height
+
+    print(f'📐 渲染尺寸已更新: {RENDER_WIDTH}x{RENDER_HEIGHT}')
+
+
+def on_config_changed():
+    """配置文件变更回调函数"""
+    try:
+        # 重新加载全局配置
+        load_global_config()
+
+        # 重新初始化引擎
+        initialize_engine()
+
+        print('🔄 应用完成')
+
+    except Exception as e:
+        print(f'❌ 配置应用失败: {e}')
+
+
+# 初始化全局配置
+load_global_config()
 
 # 加载关节配置
 with open('./static/joint_config.json', 'r', encoding='utf-8') as f:
@@ -48,29 +86,30 @@ class PoseAdjusterEngine:
     姿态调节引擎核心类
     """
 
-    def __init__(self, start_frame: int, frame_interval: int, num_frames: int, frame_offset: int = 0):
+    def __init__(self, dataset_config: DatasetConfig):
+        """
+        初始化姿态调节引擎
+        
+        :param dataset_config: 数据集配置对象
+        """
         self.poses = None
         self.betas = None
         self.model = None
         self.frame_indices = []
         self.current_frame_idx = 0
 
-        # 序列配置
-        self.start_frame = start_frame
-        self.frame_interval = frame_interval
-        self.num_frames = num_frames
-        self.frame_offset = frame_offset  # 预测数据相对于GT的偏移帧数
+        # 从配置对象获取序列配置
+        self.dataset_config = dataset_config
+        self.start_frame = dataset_config.start_frame
+        self.frame_interval = dataset_config.frame_interval
+        self.num_frames = dataset_config.num_frames
+        self.frame_offset = dataset_config.frame_offset
 
         # 当前调节状态：存储每帧的姿态调节
         self.adjusted_poses = {}  # {frame_idx: adjusted_pose_tensor}
 
-        # 相机状态
-        self.camera_pose = np.array([
-            [0.6102284363588065, 0.22558472023756496, -0.7594292524352928, -1.8948403428657872],
-            [-0.7864855217646244, 0.0573172953978972, -0.614943291452878, -1.4792258307646078],
-            [-0.09519337956872702, 0.972535995037516, 0.2123957599451424, 0.40015489940524757],
-            [0.0, 0.0, 0.0, 1.0],
-        ])
+        # 从配置获取相机姿态矩阵
+        self.camera_pose = config_manager.get_camera_pose_matrix()
 
         # 数据集信息
         self.total_frames = 0
@@ -78,34 +117,155 @@ class PoseAdjusterEngine:
 
         self.load_data()
 
+    @property
+    def render_width(self) -> int:
+        """动态获取渲染宽度"""
+        return config_manager.get_render_config().width
+
+    @property
+    def render_height(self) -> int:
+        """动态获取渲染高度"""
+        return config_manager.get_render_config().height
+
     def load_data(self):
-        """加载数据和模型"""
-        print(f'🔄 加载数据集: {DATA_SET}')
-        data = np.load(DATA_SET)
-        self.poses = data['poses']
-        self.betas = data['betas']
+        """加载数据和模型（支持多种数据集格式）"""
+        print(f'加载数据集: {self.dataset_config.path}')
 
-        # 获取数据集信息
-        self.total_frames = self.poses.shape[0]
+        # 首先尝试智能适配器（推荐方式）
+        adapter_success = False
+        recommended_model_config = None
+
         try:
-            self.framerate = float(data['mocap_framerate'])
-        except KeyError:
-            self.framerate = 30.0  # 默认帧率
+            data, model_config = DatasetAdapter.smart_convert(
+                data_path=self.dataset_config.path,
+                models_dir=Path('./models'),
+                preferred_gender=config_manager.get_current_gender()
+            )
 
-        # 计算帧序列
-        self.frame_indices = [self.start_frame + i * self.frame_interval for i in range(self.num_frames)]
-        print(f'🎯 选择帧序列: {self.frame_indices}')
+            self.poses = data['poses']
+            self.betas = data['betas']
+            recommended_model_config = model_config
+            self.total_frames = self.poses.shape[0]
+            self.framerate = float(data.get('mocap_framerate', 30.0))
+            adapter_success = True
 
-        # 加载SMPLX模型
-        print('🔄 加载SMPLX模型...')
-        self.model = SMPLX(
-            model_path=SMPL_MODEL.as_posix(),
-            gender="male",
-            num_betas=10,
-            use_pca=False,
-            flat_hand_mean=True
-        )
-        print('✅ 模型加载完成')
+        except Exception as e:
+            # 回退到标准适配器
+            try:
+                data = DatasetAdapter.convert_to_smplx_format(self.dataset_config.path)
+                self.poses = data['poses']
+                self.betas = data['betas']
+                self.total_frames = self.poses.shape[0]
+                self.framerate = float(data.get('mocap_framerate', 30.0))
+
+                if self.poses.shape[1] == 156:
+                    adapter_success = True
+
+            except Exception as std_error:
+                pass
+
+                # 如果适配器失败，回退到原始加载方式
+        if not adapter_success:
+            try:
+                if self.dataset_config.path.suffix == '.npz':
+                    data = np.load(self.dataset_config.path, allow_pickle=True)
+                elif self.dataset_config.path.suffix == '.pkl':
+                    import pickle
+                    with open(self.dataset_config.path, 'rb') as f:
+                        data = pickle.load(f, encoding='latin1')
+                else:
+                    raise ValueError(f'不支持的文件格式: {self.dataset_config.path.suffix}')
+
+                # 处理可能的list格式数据
+                poses = data['poses']
+                betas = data['betas']
+
+                # 处理多人数据（在转换为numpy数组之前）
+                if isinstance(poses, list) and len(poses) > 0:
+                    # 检查是否是多人数据（list的每个元素是一个人的数据）
+                    if isinstance(poses[0], (list, np.ndarray)):
+                        poses = poses[0]  # 取第一个人
+
+                if isinstance(betas, list) and len(betas) > 0:
+                    # 检查是否是多人数据
+                    if isinstance(betas[0], (list, np.ndarray)):
+                        betas = betas[0]  # 取第一个人
+
+                # 确保poses是numpy数组
+                if not isinstance(poses, np.ndarray):
+                    poses = np.array(poses)
+
+                # 处理poses的额外维度检查
+                if len(poses.shape) > 2:
+                    poses = poses[0]  # 取第一个人（如果还有多维）
+
+                # 确保betas是numpy数组
+                if not isinstance(betas, np.ndarray):
+                    betas = np.array(betas)
+
+                # 处理betas的额外维度检查
+                if len(betas.shape) > 1:
+                    betas = betas[0]  # 取第一个人（如果还有多维）
+
+                self.poses = poses
+                self.betas = betas[:10]  # 只取前10个beta参数
+                self.total_frames = self.poses.shape[0]
+                self.framerate = float(data.get('mocap_framerate', 30.0))
+
+            except Exception as fallback_error:
+                raise RuntimeError(f'数据加载失败: {self.dataset_config.path}')
+
+        # 计算帧序列（严格模式：只使用真实存在的原始请求帧）
+        calculated_frames = [self.start_frame + i * self.frame_interval for i in range(self.num_frames)]
+
+        # 过滤掉超出数据范围的帧（严格模式：不补充任何帧）
+        valid_frames = [f for f in calculated_frames if f < self.total_frames]
+
+        if len(valid_frames) < self.num_frames:
+            # 严格模式：只使用真实存在的帧
+            self.frame_indices = valid_frames
+            self.num_frames = len(valid_frames)
+        else:
+            self.frame_indices = valid_frames
+
+        # 最终保护：确保至少有一帧
+        if len(self.frame_indices) == 0:
+            self.frame_indices = [self.total_frames - 1]
+            self.num_frames = 1
+
+        print(f'帧序列: {self.frame_indices}')
+
+        # 加载推荐的模型
+        if recommended_model_config:
+            model_path = recommended_model_config.model_path
+            gender = recommended_model_config.gender.lower()
+
+            if recommended_model_config.model_type == 'SMPLX':
+                from smplx import SMPLX
+                self.model = SMPLX(
+                    model_path=str(model_path),
+                    gender=gender,
+                    num_betas=10,
+                    use_pca=False,
+                    flat_hand_mean=True
+                )
+            else:  # SMPL
+                from smplx import SMPL
+                self.model = SMPL(
+                    model_path=str(model_path),
+                    gender=gender,
+                    num_betas=10
+                )
+        else:
+            # 回退到默认SMPLX模型
+            from smplx import SMPLX
+            self.model = SMPLX(
+                model_path="./models/smplx/SMPLX_NEUTRAL.npz",
+                gender="neutral",
+                num_betas=10,
+                use_pca=False,
+                flat_hand_mean=True
+            )
 
     def get_current_poses(self) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -113,10 +273,37 @@ class PoseAdjusterEngine:
         
         :return: (gt_pose, adjusted_pose)
         """
+        # 确保当前帧索引在有效范围内
+        if self.current_frame_idx >= len(self.frame_indices):
+            print(
+                f'⚠️ 帧索引越界: current_frame_idx={self.current_frame_idx}, frame_indices长度={len(self.frame_indices)}')
+            self.current_frame_idx = len(self.frame_indices) - 1
+
         frame_idx = self.frame_indices[self.current_frame_idx]
 
+        # 确保帧索引在数据范围内
+        if frame_idx >= self.total_frames:
+            print(f'⚠️ 数据帧索引越界: frame_idx={frame_idx}, total_frames={self.total_frames}')
+            frame_idx = self.total_frames - 1
+
+        # 调试信息已简化
+
         # GT姿态（始终使用原始帧）
-        gt_pose = torch.tensor(self.poses[frame_idx:frame_idx + 1], dtype=torch.float32)
+        poses_slice = self.poses[frame_idx:frame_idx + 1]
+        if hasattr(poses_slice, 'clone'):
+            # 如果是PyTorch tensor
+            gt_pose = poses_slice.clone().float()
+        else:
+            # 如果是numpy array
+            gt_pose = torch.tensor(poses_slice, dtype=torch.float32)
+
+        # 验证gt_pose的维度
+        if gt_pose.shape[0] == 0:
+            print(f'❌ GT姿态为空: frame_idx={frame_idx}, poses.shape={self.poses.shape}')
+            # 使用最后一个有效帧
+            valid_frame_idx = min(frame_idx, self.total_frames - 1)
+            gt_pose = torch.tensor(self.poses[valid_frame_idx:valid_frame_idx + 1], dtype=torch.float32)
+            print(f'🔧 使用有效帧: {valid_frame_idx}')
 
         # 预测姿态的基础帧（考虑偏移）
         predicted_base_frame = frame_idx + self.frame_offset
@@ -126,8 +313,24 @@ class PoseAdjusterEngine:
             # 如果偏移超出范围，使用原始帧作为基础
             predicted_base_frame = frame_idx
 
+        # 再次确保在有效范围内
+        predicted_base_frame = max(0, min(predicted_base_frame, self.total_frames - 1))
+
         # 预测姿态始终从偏移后的基础帧开始
-        predicted_pose = torch.tensor(self.poses[predicted_base_frame:predicted_base_frame + 1], dtype=torch.float32)
+        poses_slice = self.poses[predicted_base_frame:predicted_base_frame + 1]
+        if hasattr(poses_slice, 'clone'):
+            # 如果是PyTorch tensor
+            predicted_pose = poses_slice.clone().float()
+        else:
+            # 如果是numpy array
+            predicted_pose = torch.tensor(poses_slice, dtype=torch.float32)
+
+        # 验证predicted_pose的维度
+        if predicted_pose.shape[0] == 0:
+            print(f'❌ 预测姿态为空: predicted_base_frame={predicted_base_frame}')
+            # 使用GT姿态作为备选
+            predicted_pose = gt_pose.clone()
+            print(f'🔧 使用GT姿态作为预测姿态')
 
         # 如果当前帧有用户调节，这些调节应该是存储为相对于GT的修改
         # 我们需要将这些修改应用到预测基础姿态上
@@ -135,9 +338,16 @@ class PoseAdjusterEngine:
             # 获取用户的调节数据（这应该是绝对角度）
             user_adjusted_pose = self.adjusted_poses[self.current_frame_idx].clone()
 
-            # 直接使用用户调节的绝对角度作为最终预测姿态
-            # （这里假设用户调节是想要的最终角度）
-            predicted_pose = user_adjusted_pose
+            # 确保调节后的姿态有完整的维度
+            if user_adjusted_pose.shape[1] < gt_pose.shape[1]:
+                # 如果维度不足，创建完整维度的姿态，用GT补充
+                full_adjusted_pose = gt_pose.clone()
+                # 只替换已调节的部分
+                full_adjusted_pose[0, :user_adjusted_pose.shape[1]] = user_adjusted_pose[0, :]
+                predicted_pose = full_adjusted_pose
+            else:
+                # 直接使用用户调节的绝对角度作为最终预测姿态
+                predicted_pose = user_adjusted_pose
 
         return gt_pose, predicted_pose
 
@@ -179,7 +389,13 @@ class PoseAdjusterEngine:
             if reset_base_frame < 0 or reset_base_frame >= self.total_frames:
                 reset_base_frame = frame_idx
 
-            reset_base_pose = torch.tensor(self.poses[reset_base_frame:reset_base_frame + 1], dtype=torch.float32)
+            poses_slice = self.poses[reset_base_frame:reset_base_frame + 1]
+            if hasattr(poses_slice, 'clone'):
+                # 如果是PyTorch tensor
+                reset_base_pose = poses_slice.clone().float()
+            else:
+                # 如果是numpy array
+                reset_base_pose = torch.tensor(poses_slice, dtype=torch.float32)
             current_adjusted[0, pose_index] = reset_base_pose[0, pose_index]
 
         # 保存调节结果
@@ -197,7 +413,11 @@ class PoseAdjusterEngine:
         if prev_frame_idx in self.adjusted_poses:
             # 获取上一帧的GT姿态
             prev_actual_frame = self.frame_indices[prev_frame_idx]
-            prev_gt_pose = torch.tensor(self.poses[prev_actual_frame:prev_actual_frame + 1], dtype=torch.float32)
+            poses_slice = self.poses[prev_actual_frame:prev_actual_frame + 1]
+            if hasattr(poses_slice, 'clone'):
+                prev_gt_pose = poses_slice.clone().float()
+            else:
+                prev_gt_pose = torch.tensor(poses_slice, dtype=torch.float32)
 
             # 获取上一帧的调节后姿态
             prev_adjusted_pose = self.adjusted_poses[prev_frame_idx]
@@ -207,8 +427,11 @@ class PoseAdjusterEngine:
 
             # 获取当前帧的GT姿态
             current_actual_frame = self.frame_indices[self.current_frame_idx]
-            current_gt_pose = torch.tensor(self.poses[current_actual_frame:current_actual_frame + 1],
-                                           dtype=torch.float32)
+            poses_slice = self.poses[current_actual_frame:current_actual_frame + 1]
+            if hasattr(poses_slice, 'clone'):
+                current_gt_pose = poses_slice.clone().float()
+            else:
+                current_gt_pose = torch.tensor(poses_slice, dtype=torch.float32)
 
             # 将调节变化量应用到当前帧GT上
             current_adjusted_pose = current_gt_pose + adjustment_delta
@@ -220,76 +443,214 @@ class PoseAdjusterEngine:
 
     def create_body_mesh(self, pose: torch.Tensor, material: pyrender.Material) -> pyrender.Mesh:
         """
-        创建人体3D网格
+        创建人体3D网格（兼容SMPL和SMPLX）
         
         :param pose: 姿态参数
         :param material: 渲染材质
         :return: pyrender.Mesh对象
         """
-        betas_tensor = torch.tensor(self.betas[:10][None], dtype=torch.float32)
+        # 处理betas参数，确保正确的形状和数据类型
+        if len(self.betas.shape) == 1:
+            # betas是1D数组，表示单个人的身体形状参数
+            if len(self.betas) >= 10:
+                betas_tensor = torch.tensor(self.betas[:10][None], dtype=torch.float32)
+            else:
+                # 如果betas不足10个，用零填充
+                betas_padded = np.zeros(10)
+                betas_padded[:len(self.betas)] = self.betas
+                betas_tensor = torch.tensor(betas_padded[None], dtype=torch.float32)
+        else:
+            # betas是2D数组，使用第一个人的数据
+            if self.betas.shape[0] > 0 and self.betas.shape[1] >= 10:
+                betas_tensor = torch.tensor(self.betas[0:1, :10], dtype=torch.float32)
+            else:
+                # 默认使用零值betas
+                betas_tensor = torch.zeros(1, 10, dtype=torch.float32)
+
         transl = torch.zeros(1, 3)
 
-        output = self.model(
-            betas=betas_tensor,
-            global_orient=pose[:, :3],
-            body_pose=pose[:, 3:66],
-            left_hand_pose=pose[:, 66:111],
-            right_hand_pose=pose[:, 111:],
-            transl=transl
+        # 检测模型类型
+        model_type = type(self.model).__name__
+        is_smplx_model = (
+                model_type == 'SMPLX' or
+                'SMPLX' in model_type or
+                hasattr(self.model, 'left_hand_pose') or
+                hasattr(self.model, 'right_hand_pose')
         )
+
+        try:
+            if is_smplx_model and pose.shape[1] >= 156:
+                # SMPLX模型且有完整的156维姿态数据
+                output = self.model(
+                    betas=betas_tensor,
+                    global_orient=pose[:, :3],
+                    body_pose=pose[:, 3:66],
+                    left_hand_pose=pose[:, 66:111],
+                    right_hand_pose=pose[:, 111:156],
+                    transl=transl
+                )
+            elif is_smplx_model:
+                # SMPLX模型但姿态数据不足156维，只使用身体部分
+                output = self.model(
+                    betas=betas_tensor,
+                    global_orient=pose[:, :3],
+                    body_pose=pose[:, 3:min(66, pose.shape[1])],
+                    transl=transl
+                )
+            else:
+                # SMPL模型，只使用身体参数
+                if pose.shape[1] >= 66:
+                    output = self.model(
+                        betas=betas_tensor,
+                        global_orient=pose[:, :3],
+                        body_pose=pose[:, 3:66],
+                        transl=transl
+                    )
+                else:
+                    # 姿态维度不足，扩展到66维
+                    extended_pose = torch.zeros(1, 66)
+                    extended_pose[:, :pose.shape[1]] = pose
+                    output = self.model(
+                        betas=betas_tensor,
+                        global_orient=extended_pose[:, :3],
+                        body_pose=extended_pose[:, 3:66],
+                        transl=transl
+                    )
+
+        except Exception as e:
+            print(f'❌ 模型调用失败: {str(e)}')
+            print(f'🔧 尝试回退到SMPL兼容模式...')
+
+            # 回退策略：只使用身体关节
+            try:
+                output = self.model(
+                    betas=betas_tensor,
+                    global_orient=pose[:, :3],
+                    body_pose=pose[:, 3:66],
+                    transl=transl
+                )
+                print(f'✅ 回退模式成功')
+            except Exception as fallback_error:
+                print(f'❌ 回退模式也失败: {str(fallback_error)}')
+                raise fallback_error
+
         vertices = output.vertices.detach().cpu().numpy().squeeze()
         body_mesh = trimesh.Trimesh(vertices, self.model.faces)
         return pyrender.Mesh.from_trimesh(body_mesh, material=material, smooth=False)
 
-    def render_single_frame(self, frame_idx: int) -> np.ndarray:
+    def render_single_frame(self, frame_idx: int = None) -> np.ndarray:
         """
-        渲染单帧双层模型（GT + 预测偏移后）
+        渲染单帧图像（包含GT和调节后的人体，支持不同模型格式）
         
-        :param frame_idx: 帧索引
+        :param frame_idx: 帧索引，如果为None则使用当前帧
         :return: 渲染的图像数组
         """
-        # 临时切换到指定帧来获取正确的姿态
-        original_frame_idx = self.current_frame_idx
-        self.current_frame_idx = frame_idx
+        if frame_idx is None:
+            frame_idx = self.current_frame_idx
 
-        # 使用get_current_poses方法获取正确的GT和预测姿态（包含偏移）
-        gt_pose, predicted_pose = self.get_current_poses()
+        if frame_idx < 0 or frame_idx >= self.num_frames:
+            raise ValueError(f'帧索引超出范围: {frame_idx}')
 
-        # 恢复原始帧索引
-        self.current_frame_idx = original_frame_idx
+        scene = pyrender.Scene()
 
-        # 创建材质
+        # 设置环境光
+        scene.ambient_light = [0.3, 0.3, 0.3]
+
+        # 获取当前帧的真实索引
+        real_frame_idx = self.frame_indices[frame_idx]
+
+        # 生成GT网格
+        gt_pose = self.poses[real_frame_idx]
+        if hasattr(gt_pose, 'clone'):
+            gt_pose = gt_pose.clone()  # PyTorch tensor
+        else:
+            gt_pose = torch.from_numpy(gt_pose.copy()).float()  # numpy array
+
+        # 处理betas参数 - betas通常是每个人固定的身体形状参数
+        if len(self.betas.shape) == 1:
+            # betas是1D数组，表示单个人的身体形状参数
+            betas_input = torch.from_numpy(self.betas[:10]).float().unsqueeze(0)
+        else:
+            # betas是2D数组，每一帧都有对应的betas
+            if real_frame_idx < self.betas.shape[0]:
+                betas_input = torch.from_numpy(self.betas[real_frame_idx:real_frame_idx + 1, :10]).float()
+            else:
+                # 如果索引超出范围，使用第一个betas
+                betas_input = torch.from_numpy(self.betas[0:1, :10]).float()
+
+        gt_body = self.model(
+            betas=betas_input,
+            body_pose=gt_pose[3:66].unsqueeze(0),
+            global_orient=gt_pose[:3].unsqueeze(0)
+        )
+        gt_vertices = gt_body.vertices[0].detach().cpu().numpy()
+        gt_mesh = trimesh.Trimesh(vertices=gt_vertices, faces=self.model.faces)
+
+        # 获取材质配置
+        render_config = config_manager.get_render_config()
+        gt_material_config = render_config.gt_material
+        predicted_material_config = render_config.predicted_material
+
+        # GT材质（蓝色半透明）
         gt_material = pyrender.MetallicRoughnessMaterial(
-            metallicFactor=0.2,
-            roughnessFactor=0.6,
-            alphaMode='OPAQUE',
-            baseColorFactor=(74 / 255, 84 / 255, 153 / 255, 0.7)  # 蓝色，半透明
+            baseColorFactor=gt_material_config['color'],
+            metallicFactor=gt_material_config['metallic'],
+            roughnessFactor=gt_material_config['roughness']
         )
+        gt_mesh_pyrender = pyrender.Mesh.from_trimesh(gt_mesh, material=gt_material)
+        scene.add(gt_mesh_pyrender)
 
-        pred_material = pyrender.MetallicRoughnessMaterial(
-            metallicFactor=0.2,
-            roughnessFactor=0.6,
-            alphaMode='OPAQUE',
-            baseColorFactor=(153 / 255, 84 / 255, 74 / 255, 0.8)  # 棕色，半透明
+        # 生成调节后的网格（如果有调节）
+        if frame_idx in self.adjusted_poses:
+            adjusted_pose = self.adjusted_poses[frame_idx]
+
+            # 确保adjusted_pose有正确的维度
+            if adjusted_pose.shape[1] < 66:
+                # 如果维度不足，用GT姿态的后续维度补充
+                gt_pose_full = gt_pose.clone()
+                # 只替换前面已调节的部分
+                gt_pose_full[0, :adjusted_pose.shape[1]] = adjusted_pose[0, :]
+                adjusted_pose = gt_pose_full
+
+            # 确保维度正确后再进行切片
+            if adjusted_pose.shape[1] >= 66:
+                adjusted_body = self.model(
+                    betas=betas_input,  # 使用相同的betas参数
+                    body_pose=adjusted_pose[:, 3:66],  # 不再使用unsqueeze(0)
+                    global_orient=adjusted_pose[:, :3]  # 不再使用unsqueeze(0)
+                )
+            else:
+                # 维度仍不足，跳过调节后的渲染
+                adjusted_body = None
+            if adjusted_body is not None:
+                adjusted_vertices = adjusted_body.vertices[0].detach().cpu().numpy()
+                adjusted_mesh = trimesh.Trimesh(vertices=adjusted_vertices, faces=self.model.faces)
+
+                # 调节后材质（棕色半透明）
+                predicted_material = pyrender.MetallicRoughnessMaterial(
+                    baseColorFactor=predicted_material_config['color'],
+                    metallicFactor=predicted_material_config['metallic'],
+                    roughnessFactor=predicted_material_config['roughness']
+                )
+                adjusted_mesh_pyrender = pyrender.Mesh.from_trimesh(adjusted_mesh, material=predicted_material)
+                scene.add(adjusted_mesh_pyrender)
+
+        # 获取光照配置
+        lighting_config = render_config.lighting
+
+        # 设置主光源
+        directional_light = pyrender.DirectionalLight(
+            color=[1.0, 1.0, 1.0],
+            intensity=lighting_config['directional_intensity']
         )
-
-        # 创建网格
-        gt_mesh = self.create_body_mesh(gt_pose, gt_material)
-        pred_mesh = self.create_body_mesh(predicted_pose, pred_material)
-
-        # 创建场景
-        scene = pyrender.Scene(ambient_light=[0.3, 0.3, 0.3], bg_color=[1.0, 1.0, 1.0, 1.0])
-
-        # 添加网格
-        scene.add(gt_mesh)
-        scene.add(pred_mesh)
-
-        # 添加光源
-        directional_light = pyrender.DirectionalLight(color=[1.0, 1.0, 1.0], intensity=3.0)
         light_pose = np.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 3], [0, 0, 0, 1]])
         scene.add(directional_light, pose=light_pose)
 
-        fill_light = pyrender.DirectionalLight(color=[0.8, 0.8, 0.9], intensity=2.0)
+        # 设置补充光
+        fill_light = pyrender.DirectionalLight(
+            color=lighting_config['fill_light_color'],
+            intensity=lighting_config['fill_light_intensity']
+        )
         fill_light_pose = np.eye(4)
         fill_light_pose[:3, 3] = np.array([2, 1, 2])
         scene.add(fill_light, pose=fill_light_pose)
@@ -299,7 +660,7 @@ class PoseAdjusterEngine:
         scene.add(camera, pose=self.camera_pose)
 
         # 渲染
-        renderer = pyrender.OffscreenRenderer(RENDER_WIDTH, RENDER_HEIGHT)
+        renderer = pyrender.OffscreenRenderer(self.render_width, self.render_height)
         color, _ = renderer.render(scene)
         renderer.delete()
 
@@ -319,18 +680,18 @@ class PoseAdjusterEngine:
             frames.append(frame_image)
 
         # 水平拼接所有帧
-        sequence_width = RENDER_WIDTH * self.num_frames
-        sequence_height = RENDER_HEIGHT
+        sequence_width = self.render_width * self.num_frames
+        sequence_height = self.render_height
         sequence_image = np.zeros((sequence_height, sequence_width, 3), dtype=np.uint8)
 
         for i, frame in enumerate(frames):
-            x_start = i * RENDER_WIDTH
-            x_end = (i + 1) * RENDER_WIDTH
+            x_start = i * self.render_width
+            x_end = (i + 1) * self.render_width
             sequence_image[:, x_start:x_end, :] = frame
 
         # 在当前编辑帧周围添加高亮边框
-        current_x_start = self.current_frame_idx * RENDER_WIDTH
-        current_x_end = (self.current_frame_idx + 1) * RENDER_WIDTH
+        current_x_start = self.current_frame_idx * self.render_width
+        current_x_end = (self.current_frame_idx + 1) * self.render_width
 
         # 绘制红色边框表示当前编辑帧
         border_width = 5
@@ -361,13 +722,13 @@ class PoseAdjusterEngine:
             frames.append(frame_image)
 
         # 水平拼接所有帧（无边框）
-        sequence_width = RENDER_WIDTH * self.num_frames
-        sequence_height = RENDER_HEIGHT
+        sequence_width = self.render_width * self.num_frames
+        sequence_height = self.render_height
         sequence_image = np.zeros((sequence_height, sequence_width, 3), dtype=np.uint8)
 
         for i, frame in enumerate(frames):
-            x_start = i * RENDER_WIDTH
-            x_end = (i + 1) * RENDER_WIDTH
+            x_start = i * self.render_width
+            x_end = (i + 1) * self.render_width
             sequence_image[:, x_start:x_end, :] = frame
 
         # 转换为Base64
@@ -406,6 +767,9 @@ def api_render():
             'timestamp': timestamp
         })
     except Exception as e:
+        print(f'❌ 渲染API错误: {str(e)}')
+        import traceback
+        traceback.print_exc()
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
@@ -430,7 +794,42 @@ def api_adjust():
             'modified': True
         })
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+        import traceback
+        error_msg = f"adjust错误: {str(e)}"
+        print(f"❌ {error_msg}")
+        print(f"调试信息: {traceback.format_exc()}")
+        return jsonify({'success': False, 'error': error_msg}), 500
+
+
+@app.route('/api/adjust_batch', methods=['POST'])
+def api_adjust_batch():
+    """批量调节关节角度"""
+    try:
+        data = request.json
+        changes = data['changes']
+
+        # 批量应用所有调整
+        for change in changes:
+            joint_name = change['joint_name']
+            axis = int(change['axis'])
+            angle = float(change['angle'])
+            operation = change.get('operation', 'set')
+            engine.adjust_joint(joint_name, axis, angle, operation)
+
+        # 只渲染一次（而不是每个调整都渲染）
+        image_base64 = engine.render_sequence()
+
+        return jsonify({
+            'success': True,
+            'image': image_base64,
+            'modified': True
+        })
+    except Exception as e:
+        import traceback
+        error_msg = f"adjust_batch错误: {str(e)}"
+        print(f"❌ {error_msg}")
+        print(f"调试信息: {traceback.format_exc()}")
+        return jsonify({'success': False, 'error': error_msg}), 500
 
 
 @app.route('/api/navigate', methods=['POST'])
@@ -460,7 +859,11 @@ def api_navigate():
             'modified': engine.current_frame_idx in engine.adjusted_poses
         })
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+        import traceback
+        error_msg = f"navigate错误: {str(e)}"
+        print(f"❌ {error_msg}")
+        print(f"调试信息: {traceback.format_exc()}")
+        return jsonify({'success': False, 'error': error_msg}), 500
 
 
 @app.route('/api/reset', methods=['POST'])
@@ -689,49 +1092,91 @@ def api_current_angles():
 
 
 def initialize_engine():
-    """初始化全局引擎实例"""
+    """初始化全局引擎实例（基于配置文件）"""
     global engine
-    # 序列配置（用户启动时的参数）
-    START_FRAME = 40
-    TARGET_TIME_INTERVAL_MS = 100  # 目标时间间隔（毫秒）
-    FRAME_INTERVAL = 20  # 手动帧间隔（如果不使用时间间隔）
-    NUM_FRAMES = 11
-    FRAME_OFFSET = 0  # 预测数据相对于GT的偏移帧数
 
-    # 计算实际使用的帧间隔
-    if TARGET_TIME_INTERVAL_MS > 0:
-        # 快速获取帧率信息，避免重复加载数据
-        print(f'🔄 加载数据集: {DATA_SET}')
-        data = np.load(DATA_SET)
-        try:
-            mocap_framerate = float(data['mocap_framerate'])
-        except KeyError:
-            mocap_framerate = 30.0  # 默认帧率
-
-        frame_time_ms = 1000.0 / mocap_framerate  # 每帧时间（毫秒）
-        calculated_frame_interval = max(1, round(TARGET_TIME_INTERVAL_MS / frame_time_ms))
-        actual_time_interval_ms = calculated_frame_interval * frame_time_ms
-
-        print(f'⏱️ 时间间隔控制: 目标={TARGET_TIME_INTERVAL_MS}ms, 实际={actual_time_interval_ms:.1f}ms')
-        print(f'📐 自动计算帧间隔: {calculated_frame_interval} (覆盖手动设置={FRAME_INTERVAL})')
-
-        frame_interval_to_use = calculated_frame_interval
-    else:
-        print(f'📐 使用手动设置帧间隔: {FRAME_INTERVAL}')
-        frame_interval_to_use = FRAME_INTERVAL
+    # 获取当前数据集配置
+    current_dataset_config = config_manager.get_current_dataset_config()
+    server_config = config_manager.get_server_config()
 
     # 创建引擎实例
-    engine = PoseAdjusterEngine(START_FRAME, frame_interval_to_use, NUM_FRAMES, FRAME_OFFSET)
+    engine = PoseAdjusterEngine(current_dataset_config)
 
-    print('🚀 启动交互式人体姿态调节器...')
-    print(f'📂 数据文件: {DATA_SET}')
-    print(f'🤖 模型文件: {SMPL_MODEL}')
-    print(f'🎯 帧序列: {engine.frame_indices}')
-    print(f'⚡ 帧偏移: {FRAME_OFFSET}')
-    print('🌐 服务器地址: http://localhost:5000')
-    print('-' * 50)
+    # 在数据加载后重新计算帧间隔（如果配置了时间间隔控制）
+    if current_dataset_config.time_interval_ms > 0:
+        # 使用数据集的真实帧率
+        actual_framerate = engine.framerate
+        frame_time_ms = 1000.0 / actual_framerate
+        calculated_frame_interval = max(1, round(current_dataset_config.time_interval_ms / frame_time_ms))
+
+        # 重新计算帧序列
+        if calculated_frame_interval != engine.frame_interval:
+            engine.frame_interval = calculated_frame_interval
+            engine.frame_indices = [engine.start_frame + i * calculated_frame_interval for i in
+                                    range(engine.num_frames)]
+            # 过滤掉超出数据范围的帧
+            valid_frames = [f for f in engine.frame_indices if f < engine.total_frames]
+            if len(valid_frames) < engine.num_frames:
+                engine.frame_indices = valid_frames
+                engine.num_frames = len(valid_frames)
+            print(
+                f'⏱️ 基于真实帧率{actual_framerate}fps重新计算帧间隔: {calculated_frame_interval}帧/{current_dataset_config.time_interval_ms}ms')
+            print(f'📋 更新后帧序列: {engine.frame_indices}')
+        else:
+            print(
+                f'⏱️ 帧间隔无需调整: {calculated_frame_interval}帧/{current_dataset_config.time_interval_ms}ms ({actual_framerate}fps)')
+
+    host = server_config.get('host', '0.0.0.0')
+    port = server_config.get('port', 5000)
+    print(f'启动服务器: http://localhost:{port}')
+
+
+def start_config_monitoring():
+    """启动配置文件监控"""
+    global _cleanup_registered
+    try:
+        # 注册配置变更回调（避免重复注册）
+        config_manager.register_change_callback(on_config_changed)
+
+        # 启动配置文件监控
+        config_manager.start_monitoring()
+
+        # 只注册一次退出清理
+        if not _cleanup_registered:
+            atexit.register(stop_config_monitoring)
+            _cleanup_registered = True
+
+    except Exception as e:
+        print(f'❌ 启动配置文件监控失败: {e}')
+
+
+def stop_config_monitoring():
+    """停止配置文件监控"""
+    try:
+        config_manager.stop_monitoring()
+        # 移除重复输出，由config_manager.stop_monitoring()自己输出
+    except Exception as e:
+        print(f'❌ 停止配置文件监控失败: {e}')
+
+
+# 注册程序退出时的清理函数已移动到start_config_monitoring函数内
 
 
 if __name__ == '__main__':
+    # 启动配置文件监控
+    start_config_monitoring()
+
+    # 初始化引擎
     initialize_engine()
-    app.run(debug=True, host='0.0.0.0', port=5000)
+
+    # 从配置获取服务器设置
+    server_config = config_manager.get_server_config()
+    host = server_config.get('host', '0.0.0.0')
+    port = server_config.get('port', 5000)
+    debug = server_config.get('debug', True)
+
+    try:
+        app.run(debug=debug, host=host, port=port)
+    finally:
+        # 确保停止监控
+        stop_config_monitoring()
