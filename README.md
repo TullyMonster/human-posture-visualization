@@ -210,7 +210,7 @@ server:
 
 ## 联系方式
 
-如有问题或建议，请通过以下方式联系我们：
+如有问题或建议，可通过以下方式联系：
 
 - 📧 Email: [zeng-qi-hang@qq.com](mailto:zeng-qi-hang@qq.com)
 - 🐛 Issues: [GitHub Issues](https://github.com/TullyMonster/human-posture-visualization/issues)

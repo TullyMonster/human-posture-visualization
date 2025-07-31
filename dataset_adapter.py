@@ -331,6 +331,13 @@ class DatasetAdapter:
             print(f'🔄 检测到分离姿态参数，重组中...')
             global_orient = np.array(data['global_orient'])
             body_pose = np.array(data['body_pose'])
+
+            # 处理不同格式的body_pose
+            if len(body_pose.shape) == 3 and body_pose.shape[1:] == (23, 3):
+                # 格式：(N, 23, 3) -> (N, 69)
+                body_pose = body_pose.reshape(body_pose.shape[0], -1)
+                print(f'🔄 重塑body_pose: (N, 23, 3) → (N, 69)')
+            
             smpl_poses = np.concatenate([global_orient, body_pose], axis=-1)
             smplx_poses = DatasetAdapter._extend_poses_to_smplx(smpl_poses)
             converted['poses'] = smplx_poses.astype(np.float32)
@@ -428,8 +435,13 @@ class DatasetAdapter:
             global_orient = np.array(data['global_orient'])
             body_pose = np.array(data['body_pose'])
 
-            # 截取body_pose到适当维度（69维）
-            if body_pose.shape[-1] > 69:
+            # 处理不同格式的body_pose
+            if len(body_pose.shape) == 3 and body_pose.shape[1:] == (23, 3):
+                # 格式：(N, 23, 3) -> (N, 69)
+                body_pose = body_pose.reshape(body_pose.shape[0], -1)
+                print(f'🔄 重塑body_pose: (N, 23, 3) → (N, 69)')
+            elif body_pose.shape[-1] > 69:
+                # 截取body_pose到适当维度（69维）
                 body_pose = body_pose[:, :69]
 
             poses = np.concatenate([global_orient, body_pose], axis=-1)
@@ -618,13 +630,19 @@ class DatasetAdapter:
 
         # 重组姿态参数：global_orient + body_pose
         global_orient = data['global_orient']  # (N, 3)
-        body_pose = data['body_pose']  # (N, 69)
+        body_pose = data['body_pose']  # (N, 69) 或 (N, 23, 3)
 
         # 检查维度
         if global_orient.shape[-1] != 3:
             raise ValueError(f'HuMMan global_orient维度错误: {global_orient.shape[-1]}, 期望3维')
-        if body_pose.shape[-1] != 69:
-            raise ValueError(f'HuMMan body_pose维度错误: {body_pose.shape[-1]}, 期望69维')
+
+        # 处理不同格式的body_pose
+        if len(body_pose.shape) == 3 and body_pose.shape[1:] == (23, 3):
+            # 格式：(N, 23, 3) -> (N, 69)
+            body_pose = body_pose.reshape(body_pose.shape[0], -1)
+            print(f'🔄 重塑body_pose: (N, 23, 3) → (N, 69)')
+        elif body_pose.shape[-1] != 69:
+            raise ValueError(f'HuMMan body_pose维度错误: {body_pose.shape}, 期望(N, 69)或(N, 23, 3)')
 
         # 合并为72维SMPL姿态参数
         smpl_poses = np.concatenate([global_orient, body_pose], axis=-1)  # (N, 72)
